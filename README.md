@@ -1,4 +1,4 @@
-# Team 7: UFC Fight Prediction and Analysis
+# MGT-6203 Project: UFC Fight Prediction and Analysis
 
 **Team Members**: 
 * Alejandro Forero (aeng61@gatech.edu)
