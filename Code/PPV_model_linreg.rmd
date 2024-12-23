@@ -1,0 +1,389 @@
+---
+title: "Predicting PPV"
+output:
+  html_document:
+    theme: flatly
+    toc: yes
+    toc_float:
+      collapsed: true
+---
+
+# Libraries + Data Upload
+```{r, echo=FALSE}
+library(tidyverse) # dplyr/ggplot2
+library(corrplot) # used this to create correlation matrices in EDA
+library(car) # used this for vif
+
+fight_data <- read.csv("../Data/Cleaned/fight_data.csv")
+ppv_data <- read.csv("../Data/Cleaned/ppv_data.csv")
+df_records <- read.csv("../Data/Cleaned/df_records.csv")
+agg_stats <- read.csv("../Data/Cleaned/fighter_agg.csv")
+fight_data_raw <- read.csv("../Data/Raw/ufc_data_till_UFC_292.csv")
+
+ppv_data$date <- as.Date(ppv_data$date)
+df_records$date <- as.Date(df_records$date)
+fight_data$date <- as.Date(fight_data$date)
+agg_stats$date <- as.Date(agg_stats$date)
+fight_data_raw$date <- as.Date(fight_data_raw$date, format = "%B %d, %Y")
+```
+
+# Step 1: Exploratory Data Analysis
+
+```{r}
+# Code block just get the last name 
+fight_data_names <- fight_data %>%
+  mutate(red_last_name = word(R_fighter, -1, -1), 
+         blue_last_name = word(B_fighter, -1, -1),
+         fighter_1 = pmin(red_last_name, blue_last_name), 
+         fighter_2 = pmax(red_last_name, blue_last_name)) %>%
+  select(date, R_fighter, B_fighter, fighter_1, fighter_2)
+```
+
+## 1D EDA
+```{r}
+ggplot(ppv_data, aes(x = PPV)) +
+  geom_histogram(binwidth = 100000) + 
+  xlab("PPV Value") + ylab("Frequency") + ggtitle("Histogram of PPV")
+
+ggplot(ppv_data, aes(y = PPV)) +
+  geom_boxplot() + 
+  ylab("PPV Value") + ggtitle("PPV Value Boxplot")
+
+ggplot(ppv_data, aes(x = log(PPV))) + 
+  geom_histogram()
+```
+## EDA: PPV vs. Date
+```{r}
+# Get day of week and month parameters
+ppv_dates_data <- ppv_data %>%
+  mutate(day_of_week = weekdays(as.Date(ppv_data$date)), 
+         month = as.factor(format(as.Date(ppv_data$date),"%m")), 
+         year = as.factor(format(as.Date(ppv_data$date),"%Y")))
+
+# Violin plots showing distribution of PPV by month of year
+ggplot(ppv_dates_data, aes(x = year, y = PPV)) + 
+  geom_violin() + 
+  stat_summary(fun.y=mean, geom="point", color="red") + 
+  xlab("Year") + ylab("PPV Value") + ggtitle("Distribution of PPV Values by Year")
+
+ggplot(ppv_dates_data, aes(x = month, y = PPV)) + 
+  geom_violin() + 
+  stat_summary(fun.y=mean, geom="point", size=1, color="red") +
+  xlab("Month") + ylab("PPV Value") + ggtitle("Distribution of PPV Values by Month")
+
+# Distirbution varies quite a bit between Friday and Saturday Samples
+ggplot(ppv_dates_data, aes(x = day_of_week, y = PPV)) + 
+  geom_violin() + 
+  stat_summary(fun.y=mean, geom="point", size=1, color="red") +
+  xlab("Day of Week") + ylab("PPV Value") + ggtitle("Distribution of PPV Values by Day of Week")
+
+# Scatterplot of PPV Value by Date
+ggplot(ppv_dates_data, aes(x=as.Date(date), y=PPV, col=day_of_week)) + geom_point() + geom_smooth(method='lm')
+ggplot(ppv_dates_data, aes(x=as.Date(date), y=PPV)) + geom_point() + geom_smooth(method='lm')
+```
+
+## PPV with Location and Fight Type
+```{r}
+ppv_with_location_division <- ppv_data %>%
+  inner_join(fight_data_names, by = c("date", "fighter_1", "fighter_2")) %>%
+  inner_join(fight_data_raw, by = c("date", "R_fighter", "B_fighter")) %>%
+  select(date, PPV, location, Fight_type) %>%
+  mutate(country = sub('.*,\\s*', '', location), 
+         isUSA = ifelse(country == "USA", 1, 0), 
+         isNAM = ifelse(country %in% c("USA", "Canada", "Mexico"), 1, 0), 
+         isSAM = ifelse(country %in% c("Brazil"), 1, 0),
+         isEUR = ifelse(country %in% c("United Kingdom", "Ireland", "Germany"), 1, 0), 
+         isAP = ifelse(country %in% c("Australia", "United Arab Emirates", "Japan"), 1, 0),
+         isWomens = ifelse(grepl("Women", Fight_type, fixed=TRUE), 1, 0), 
+         isTitle = ifelse(grepl("Title", Fight_type, fixed=TRUE), 1, 0))
+
+ggplot(ppv_with_location_division, aes(x = country, y = PPV)) + 
+  geom_violin() + 
+  stat_summary(fun.y=mean, geom="point", size=1, color="red") 
+
+# When the main event is a women's event, the mean PPV is higher
+ggplot(ppv_with_location_division, aes(x = as.factor(isWomens), y = PPV)) + 
+  geom_violin() + 
+  stat_summary(fun.y = mean, geom="point", size=1, color="red")
+
+# but, all women data points happened later in the UFC data, and there was some correlation between date and PPV
+ggplot(ppv_with_location_division, aes(x=as.Date(date), y=PPV, col=as.factor(isWomens))) + 
+  geom_point() + 
+  geom_smooth(method='lm')
+
+# When the main event is a women's event, the mean PPV is higher
+ggplot(ppv_with_location_division, aes(x = as.factor(isTitle), y = PPV)) + 
+  geom_violin() + 
+  stat_summary(fun.y = mean, geom="point", size=1, color="red")
+
+# but, all women data points happened later in the UFC data, and there was some correlation between date and PPV
+ggplot(ppv_with_location_division, aes(x=as.Date(date), y=PPV, col=as.factor(isTitle))) + 
+  geom_point() + 
+  geom_smooth(method='lm')
+
+
+ppv_with_location_division %>%
+  mutate(date = as.numeric(date)) %>%
+  select(date, PPV, isUSA, isNAM, isSAM, isEUR, isAP, isWomens, isTitle) %>%
+  cor() %>%
+  corrplot(method='number', diag=FALSE)
+```
+
+## PPV with past records
+```{r}
+# is there any correlation between the PPV data and records? 
+ppv_with_records <- ppv_data %>% 
+  # this step is so we can get the full name, which is easier to use when joining to df_records
+  inner_join(fight_data_names, by = c("date", "fighter_1", "fighter_2")) %>%
+  select(date, PPV, fighter_1, fighter_2, R_fighter, B_fighter) %>% 
+  inner_join(df_records, by = join_by(date, R_fighter == fighter)) %>%
+  inner_join(df_records, by = join_by(date, B_fighter == fighter), suffix = c("_R", "_B")) %>%
+  mutate(max_win_percent = pmax(win_percentage_R, win_percentage_B), 
+         max_win_streak = pmax(win_streak_R, win_streak_B))
+ppv_with_records$avg_win_percent = rowMeans(ppv_with_records[, c('win_percentage_R', 'win_percentage_B')])
+ppv_with_records$avg_win_streak = rowMeans(ppv_with_records[, c('win_streak_R', 'win_streak_B')])
+
+# surprisingly isn't a huge correlation between the win streak or win percentage and the PPV
+ppv_with_records %>%
+  mutate(date_numeric = as.numeric(date)) %>%
+  select(PPV, date_numeric, max_win_percent, max_win_streak, avg_win_percent, avg_win_streak) %>%
+  cor() %>%
+  corrplot(method = 'number', diag=FALSE)
+
+ppv_with_records %>%
+  filter(max_win_percent > 0) %>%
+  ggplot(aes(x = max_win_percent, y = PPV)) + 
+  geom_point()
+
+ppv_with_records %>%
+  group_by(max_win_streak) %>%
+  summarize(avg_PPV = mean(PPV)) %>%
+  ggplot(aes(x = max_win_streak, y = avg_PPV)) + 
+  geom_col()
+
+ppv_with_records %>%
+  filter(avg_win_percent > 0) %>%
+  ggplot(aes(x = avg_win_percent, y = PPV)) + 
+  geom_point()
+
+ppv_with_records %>%
+  group_by(avg_win_streak) %>%
+  summarize(avg_PPV = mean(PPV)) %>%
+  ggplot(aes(x = avg_win_streak, y = avg_PPV)) + 
+  geom_col()
+```
+
+## PPV with past fighter statistics
+```{r, fig.width=12, fig.height=12}
+# In the LONG format of ppv with aggregate stats, each match date will have 2 rows, one row for each fighter. I figured this would make it easier to do the correlation plots for EDA
+ppv_stats_r <- ppv_data %>% 
+  # this step is so we can get the full name, which is easier to use when joining to agg_stats
+  inner_join(fight_data_names, by = c("date", "fighter_1", "fighter_2")) %>%
+  select(date, PPV, fighter_1, fighter_2, R_fighter, B_fighter) %>% 
+  inner_join(agg_stats, by = join_by(date, R_fighter == fighter))
+
+ppv_stats_b <- ppv_data %>% 
+  # this step is so we can get the full name, which is easier to use when joining to agg_stats
+  inner_join(fight_data_names, by = c("date", "fighter_1", "fighter_2")) %>%
+  select(date, PPV, fighter_1, fighter_2, R_fighter, B_fighter) %>% 
+  inner_join(agg_stats, by = join_by(date, B_fighter == fighter))
+
+ppv_with_agg_stats_long <- rbind(ppv_stats_r, ppv_stats_b)
+
+# Replace all NAs with 0 - This only happened if it was a fighter's debut 
+ppv_with_agg_stats_long$is_debut <- ifelse(is.na(ppv_with_agg_stats_long$KD), 1, 0)
+ppv_with_agg_stats_long[is.na(ppv_with_agg_stats_long)] <- 0
+
+ppv_with_agg_stats_long %>%
+  select(-c(date,  fighter_1, fighter_2, R_fighter, B_fighter)) %>% 
+  cor() %>%
+  corrplot(method='number', diag=FALSE)
+```
+
+## Finalized EDA (for Report)
+```{r}
+# Scatterplot of PPV by date
+ggplot(ppv_data, aes(x=date, y=PPV)) + 
+  geom_point() + 
+  xlab("Date") + ylab("PPV Sales") + ggtitle("PPV Sales by Date") +
+  theme_minimal() 
+
+# Boxplot of PPV by win Streak
+ppv_with_records %>%
+  mutate(streak_cut = cut(round(avg_win_streak), breaks = 1:4, labels = c("0", "1", "2")), 
+         streak_cut = ifelse(is.na(streak_cut), "3+", streak_cut)) %>% 
+  ggplot(aes(x = streak_cut, y = PPV)) + 
+  geom_boxplot() + 
+  xlab("Win Streak of Main Event Players") + ylab("PPV Sales") + 
+  ggtitle("PPV Sales by Win Streak") +
+  theme_minimal()
+
+# Boxplot of PPV by Continent
+ppv_with_location_division %>%
+  mutate(Continent = case_when(
+    country %in% c("USA", "Canada", "Mexico") ~ "North America", 
+    country %in% c("Brazil") ~ "South America",
+    country %in% c("United Kingdom", "Ireland", "Germany") ~ "Europe", 
+    country %in% c("Australia", "United Arab Emirates", "Japan") ~ "Asia", 
+    .default = "should_never_get_here"
+  )) %>%
+  ggplot(aes(x = Continent, y = PPV)) +
+  geom_boxplot() + 
+  ylab("PPV Sales") + ggtitle("PPV Sales by Continent") +
+  theme_minimal()
+
+# Boxplot of PPV by Whether Main Event is a Title Match
+ppv_with_location_division %>%
+  mutate(matchType = ifelse(isTitle == 1, "Title Match", "Non-Title Match")) %>%
+  ggplot(aes(x = matchType, y = PPV)) + 
+  geom_boxplot() + 
+  xlab("Match Type") + ylab("PPV Sales") + 
+  ggtitle("PPV Sales by Whether Main is Title Match") + 
+  theme_minimal()
+```
+
+
+
+# Step 2: Data Preprocessing
+
+From looking at the correlation matrix, it was clear that some variables are multicollinear. For example, the CLINCH_ATT (corner strikes in the clinch attempted) and CLINCH_LND (corner strikes in the clinch landed) have a correlation of 0.98. After reading some articles online, it was determined that one way to deal with this outside of removing the variable is to combine multicollinear variables into one. Thus, I decided to transform any LND and ATT variables into one percent variabble (percent = LND / ATT). After creating these variables, I removed the original LND/ATT variables. Note that some LND/ATT variables already existed 
+```{r}
+# Convert the LND and ATT statistics into percentage ones
+agg_stats_pct <- agg_stats %>%
+  mutate(TOT_STR_pct = TOT_STR_LND / TOT_STR_ATT, 
+         HEAD_pct = HEAD_LND / HEAD_ATT, 
+         BODY_pct = BODY_LND / BODY_ATT, 
+         LEG_pct = LEG_LND / LEG_ATT, 
+         DIST_pct = DIST_LND / DIST_ATT, 
+         CLINCH_pct = CLINCH_LND / CLINCH_ATT, 
+         GRND_pct = GRND_LND / GRND_ATT) %>%
+  select(-c(SIG_STR_LND, SIG_STR_ATT, TOT_STR_LND, TOT_STR_ATT, TD_LND, TD_ATT, HEAD_LND, HEAD_ATT, BODY_LND, BODY_ATT, LEG_LND, LEG_ATT, DIST_LND, DIST_ATT, 
+            CLINCH_LND, CLINCH_ATT, GRND_LND, GRND_ATT))
+
+# Combine the PPV data with the aggregated stats
+ppv_with_agg_stats_pct <- ppv_data %>% 
+  # this step is so we can get the full name, which is easier to use when joining to agg_stats_pct
+  inner_join(fight_data_names, by = c("date", "fighter_1", "fighter_2")) %>%
+  select(date, PPV, fighter_1, fighter_2, R_fighter, B_fighter) %>% 
+  inner_join(agg_stats_pct, by = join_by(date, R_fighter == fighter)) %>%
+  inner_join(agg_stats_pct, by = join_by(date, B_fighter == fighter), suffix = c("_R", "_B"))
+
+# Replace all NAs with 0 - This only happened if it was a fighter's debut 
+ppv_with_agg_stats_pct[is.na(ppv_with_agg_stats_pct)] <- 0
+ppv_with_records[is.na(ppv_with_records)] <- 0
+
+# Combine aggregated stats, records, and PPV data
+ppv_data_joined_for_lm <- ppv_with_records %>%
+  inner_join(ppv_with_agg_stats_pct, by = c("date", "PPV", "fighter_1", "fighter_2", "R_fighter", "B_fighter")) %>%
+  inner_join(ppv_with_location_division, by = c("date", "PPV")) %>%
+  # remove columns related to name (not needed for linear regression)
+  select(-c(fighter_1, fighter_2, R_fighter, B_fighter, location, country, Fight_type)) %>%
+  # remove columns that can be calculated via other columns (aliased columns)
+  select(-c(win_percentage_R, win_percentage_B, max_win_percent, max_win_streak, avg_win_percent, avg_win_streak, isAP))
+
+# taking this from Andrew's code to get train-validation split :) 
+set.seed(42)
+m <- nrow(ppv_data_joined_for_lm)
+trn_rows <- sample(1:m, size=round(m*0.8), replace=FALSE)
+d_train <- ppv_data_joined_for_lm[trn_rows,]
+d_val <- ppv_data_joined_for_lm[-trn_rows,]
+```
+
+# Step 3: Model Selection
+
+To figure out the best model for the feature, I decide to do the following: 
+- Run the model on a training set (80% of the data)
+- Calculate the R^2 and MSE on the test set (20% of the data)
+Since there were lots of variables, I decided to use stepwise regression for feature selection. The total models I considered were: 
+- Running on all predictors
+- Running on all predictors, but applying a log transformation on PPV
+- Running on predictors chosen from stepwise regression
+- Running on predictors chosen from stepwise regression, but applying a log transformation on PPV
+
+```{r}
+col_names <- c("Model", "Train R^2", "Train MSE", "Test R^2", "Test MSE")
+model_fit<- data.frame(matrix(ncol=5,nrow=0, 
+                             dimnames=list(NULL, col_names)))
+
+fit_lm_model <- function(formula, model_name){
+  # Fit the model
+  lm_model <- lm(formula, d_train) 
+  #print(summary(lm_model))
+  # Gather model fit metrics on training set
+  train_r_squared <- summary(lm_model)$r.squared
+  train_MSE <- mean(summary(lm_model)$residuals^2)
+  
+  # Gather model fit metrics on validation set
+  val_pred <- predict(lm_model, d_val)
+  validate_SSE <- sum((d_val$PPV - val_pred)^2)
+  validate_y_bar <- mean(d_val$PPV) 
+  validate_SST <- sum((d_val$PPV - validate_y_bar)^2)
+  validate_r_squared <- 1 - (validate_SSE / validate_SST)
+  validate_MSE <- mean((d_val$PPV - val_pred)^2)
+  
+  # Add a row to model_fit with these metrics
+  observation <- data.frame(model_name, train_r_squared, train_MSE, validate_r_squared, validate_MSE)
+  names(observation) <- col_names
+  model_fit <<- rbind(model_fit, observation)
+  # rbind led to some weird row numbers, this helps remove some confusion
+  rownames(model_fit) <<- NULL 
+}
+```
+
+To get formulas for stepwise regression, I used the step() function. For the sake of 
+```{r}
+fit_lm_model(PPV ~ ., "All predictors")
+fit_lm_model(log(PPV) ~ ., "All predictors, log(PPV)")
+fit_lm_model(PPV ~ total_wins_R + total_draws_R + lose_streak_R + 
+    total_wins_B + SIG_STR_pct_R + HEAD_pct_R + CLINCH_pct_R + 
+    GRND_pct_R + KD_B + SUB_ATT_B + REV_B + CTRL_B + HEAD_pct_B + 
+    CLINCH_pct_B + isNAM + isWomens + isTitle, "Stepwise Regression Predictors")
+fit_lm_model(PPV ~ date + total_wins_R + total_draws_R + lose_streak_R + 
+    total_wins_B + total_losses_B + KD_R + REV_R + CTRL_R + BODY_pct_R + 
+    CLINCH_pct_R + TD_pct_B + SUB_ATT_B + TOT_STR_pct_B + BODY_pct_B + 
+    CLINCH_pct_B + GRND_pct_B + isUSA + isSAM + isWomens + isTitle, "Backward Selection Predictors")
+model_fit
+```
+
+# Step 4: Model Evaluation
+
+```{r, fig.height = 9}
+lm_best <- lm(PPV ~ total_wins_R + total_draws_R + lose_streak_R + 
+    total_wins_B + SIG_STR_pct_R + HEAD_pct_R + CLINCH_pct_R + 
+    GRND_pct_R + KD_B + SUB_ATT_B + REV_B + CTRL_B + HEAD_pct_B + 
+    CLINCH_pct_B + isNAM + isWomens + isTitle, data = ppv_data_joined_for_lm)
+summary(lm_best)
+par(mfrow = c(2, 2))
+plot(lm_best)
+```
+
+```{r}
+# Get correlation of variables with PPV (similar format as Alejandro's for report)
+cor_mat <- ppv_data_joined_for_lm %>%
+  select(PPV, total_wins_R, total_draws_R, lose_streak_R, total_wins_B, SIG_STR_pct_R, 
+         HEAD_pct_R, CLINCH_pct_R, GRND_pct_R, KD_B, SUB_ATT_B, REV_B, CTRL_B, 
+         HEAD_pct_B, CLINCH_pct_B, isNAM, isWomens, isTitle) %>%
+  cor()
+
+ppv_correlations <- cor_mat["PPV", -1]
+cor_df <- data.frame(Variable = names(ppv_correlations), Correlation = ppv_correlations)
+ggplot(cor_df, aes(x = reorder(Variable, Correlation), y = Correlation, fill = Correlation)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +  # Flip coordinates for better visualization of variable names
+  labs(x = "Variable", y = "Correlation with PPV") +
+  ggtitle("Correlation of Variables with PPV") +
+  theme_minimal() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, space = "Lab", name="Correlation")
+```
+
+### Factors that could lead to more PPV buys
+- Total wins of both players
+  - Conversely, more draws or a longer losing streak of the red (preferred) player can lead to fewer PPV buys
+- Women's as the main event
+- If the fight is in North America
+- Specific statistics about red and blue fighters, including SIG_STR, HEAD, CLINCH, GRND, KD, SUB_ATT, REV, CTRL
+
+### Limitations of dataset
+
+- Our dataset doesn't include other factors like the general popularity of each fighter, whether the fighters are big rivals, etc. that may impact whether people buy PPVs
+- People buy PPVs for the whole UFC, but our data only includes the names of the fighters for the main event
